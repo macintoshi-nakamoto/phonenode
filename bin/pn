@@ -344,7 +344,7 @@ cmd_tunnel() {
   while [ $# -gt 0 ]; do
     case "$1" in --ssh-port) ssh_port=$2; shift 2 ;; *) die "unknown option $1" ;; esac
   done
-  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -gt 0 ] && [ "$port" -lt 65536 ] || die "port must be a number"
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "port must be a number between 1 and 65535"; fi
   case "$target" in *@*) ;; *) die "target must look like user@host" ;; esac
   has ssh || die "openssh is not installed: pkg install openssh"
   mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
@@ -380,7 +380,7 @@ cmd_heartbeat() {
   if [ "$1" = off ]; then [ -f "$(conf_path heartbeat)" ] && cmd_remove heartbeat; return; fi
   local url=$1 minutes=${2:-5}
   case "$url" in http://*|https://*) ;; *) die "url must start with http:// or https://" ;; esac
-  [[ "$minutes" =~ ^[0-9]+$ ]] && [ "$minutes" -gt 0 ] || die "minutes must be a positive number"
+  if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -lt 1 ]; then die "minutes must be a positive number"; fi
   has curl || die "curl is not installed: pkg install curl"
   cmd_add heartbeat "while :; do curl -fsS -m 20 -o /dev/null $(printf '%q' "$url") || true; sleep $((minutes * 60)); done" --delay 30 >/dev/null
   start_one heartbeat
