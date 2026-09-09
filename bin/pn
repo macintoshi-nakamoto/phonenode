@@ -25,7 +25,19 @@ alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 readnum() { [ -f "$1" ] && tr -dc '0-9' <"$1"; }
 conf_path() { printf '%s/%s.conf' "$services" "$1"; }
 now() { date +%s; }
-boot_epoch() { printf '%s' $(( $(now) - $(cut -d. -f1 /proc/uptime) )); }
+
+uptime_s() {
+  local u
+  if u=$(cut -d. -f1 /proc/uptime 2>/dev/null) && [ -n "$u" ]; then printf '%s' "$u"; return; fi
+  if u=$(awk '{print $22}' /proc/self/stat 2>/dev/null) && [ -n "$u" ]; then printf '%s' $((u / 100)); return; fi
+  printf '0'
+}
+boot_epoch() { printf '%s' $(( $(now) - $(uptime_s) )); }
+
+sshd_listening() {
+  timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/8022 && head -c 4 <&3' 2>/dev/null | grep -q '^SSH' && return 0
+  pgrep -x sshd >/dev/null 2>&1
+}
 
 ago() {
   local s=$1 d h m
@@ -183,7 +195,7 @@ cmd_status() {
     model=$(hostname); os=$(uname -s)
   fi
   arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
-  up=$(ago "$(cut -d. -f1 /proc/uptime)")
+  up=$(ago "$(uptime_s)")
   line="${bold}phonenode $version${reset} on $model, $os, $arch, up $up"
   bat=$(battery) && line="$line, battery $bat"
   say "$line"
@@ -191,7 +203,7 @@ cmd_status() {
     say "wake lock   $(wakelock_state)"
     say "boot hook   $(boot_state)"
     if ! has sshd; then say "sshd        not installed"
-    elif pgrep -x sshd >/dev/null 2>&1; then say "sshd        running on port 8022"
+    elif sshd_listening; then say "sshd        running on port 8022"
     else say "sshd        not running"; fi
   fi
   if [ -f "$base/tunnel.conf" ]; then
@@ -238,9 +250,11 @@ cmd_doctor() {
   problems=0
   local f name st rs free arch v go
   if on_termux; then
-    case "${TERMUX_APK_RELEASE:-}" in
-      PLAY*|play*) fail "this Termux is the Play Store build, which is abandoned and cannot install packages. Install Termux from F-Droid." ;;
-      *) ok "Termux ${TERMUX_VERSION:-} (${TERMUX_APK_RELEASE:-unknown build})" ;;
+    local rel="${TERMUX_APP__APK_RELEASE:-${TERMUX_APK_RELEASE:-}}"
+    case "$rel" in
+      PLAY*|play*|GOOGLE*) fail "this Termux is the Play Store build, which is abandoned and cannot install packages. Install Termux from F-Droid." ;;
+      "") ok "Termux ${TERMUX_VERSION:-}" ;;
+      *) ok "Termux ${TERMUX_VERSION:-} ($rel build)" ;;
     esac
     if ! has termux-wake-lock; then
       fail "termux-api package missing: pkg install termux-api, and install the Termux:API app from F-Droid"
@@ -266,7 +280,7 @@ cmd_doctor() {
     [ "$(prop ro.config.low_ram)" = true ] && info "this is Android Go, which kills background apps harder than regular Android. The battery settings below matter twice."
     vendor_advice "${v:-unknown}"
     if ! has sshd; then warn "openssh not installed: pkg install openssh, then passwd, then sshd"
-    elif ! pgrep -x sshd >/dev/null 2>&1; then warn "sshd is not running, start it with: sshd (the boot hook does this after a reboot)"
+    elif ! sshd_listening; then warn "sshd is not running, start it with: sshd (the boot hook does this after a reboot)"
     elif [ ! -s "$HOME/.ssh/authorized_keys" ]; then ok "sshd running on 8022, password login only. Put your public key in ~/.ssh/authorized_keys"
     else ok "sshd running on 8022 with authorized keys"; fi
     arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
