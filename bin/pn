@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+set -u
+
+version=0.1.0
+base="$HOME/.phonenode"
+services="$base/services"
+enabled="$base/enabled"
+logs="$base/logs"
+run="$base/run"
+lib="$base/lib"
+hook="$HOME/.termux/boot/phonenode.sh"
+
+if [ -t 1 ]; then
+  bold=$'\e[1m' dim=$'\e[2m' red=$'\e[31m' green=$'\e[32m' yellow=$'\e[33m' reset=$'\e[0m'
+else
+  bold='' dim='' red='' green='' yellow='' reset=''
+fi
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'pn: %s\n' "$*" >&2; exit 1; }
+has() { command -v "$1" >/dev/null 2>&1; }
+on_termux() { case "${PREFIX:-}" in */com.termux/*) return 0 ;; esac; return 1; }
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$ ]]; }
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+readnum() { [ -f "$1" ] && tr -dc '0-9' <"$1"; }
+conf_path() { printf '%s/%s.conf' "$services" "$1"; }
+now() { date +%s; }
+boot_epoch() { printf '%s' $(( $(now) - $(cut -d. -f1 /proc/uptime) )); }
+
+ago() {
+  local s=$1 d h m
+  d=$((s / 86400)); h=$((s % 86400 / 3600)); m=$((s % 3600 / 60))
+  if [ "$d" -gt 0 ]; then printf '%dd %dh' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
+  else printf '%dm' "$m"; fi
+}
+
+load_conf() {
+  cmd=; dir="$HOME"; delay=5
+  . "$(conf_path "$1")"
+}
+
+prop() { has getprop && getprop "$1" 2>/dev/null | tr -d '\r'; }
+
+battery() {
+  has termux-battery-status || return 1
+  local j
+  j=$(timeout 5 termux-battery-status 2>/dev/null) || return 1
+  local pct st
+  pct=$(printf '%s' "$j" | sed -n 's/.*"percentage": *\([0-9]*\).*/\1/p' | head -1)
+  st=$(printf '%s' "$j" | sed -n 's/.*"status": *"\([A-Z_]*\)".*/\1/p' | head -1)
+  [ -n "$pct" ] || return 1
+  printf '%s%% %s' "$pct" "$(printf '%s' "$st" | tr '[:upper:]' '[:lower:]')"
+}
+
+state_of() {
+  local name=$1 sup child
+  sup=$(readnum "$run/$name.pid"); child=$(readnum "$run/$name.child")
+  if [ ! -e "$enabled/$name" ]; then printf 'stopped'
+  elif alive "$sup" && alive "$child"; then printf 'running'
+  elif alive "$sup"; then printf 'restarting'
+  else printf 'dead'; fi
+}
+
+boot_state() {
+  [ -f "$hook" ] || { printf 'not installed'; return; }
+  local booted be
+  booted=$(readnum "$run/booted"); be=$(boot_epoch)
+  if [ -n "$booted" ] && [ "$booted" -ge "$be" ]; then
+    printf 'ran %s after the last boot' "$(ago $((booted - be)))"
+  elif [ "$(stat -c %Y "$hook")" -ge "$be" ]; then
+    printf 'installed, not verified yet, reboot the phone once'
+  else
+    printf 'did not run since the last boot'
+  fi
+}
+
+wakelock_state() {
+  has termux-wake-lock || { printf 'n/a'; return; }
+  local t
+  t=$(readnum "$run/wakelock")
+  if [ -n "$t" ] && [ "$t" -ge "$(boot_epoch)" ]; then printf 'held'; else printf 'not held'; fi
+}
+
+cmd_add() {
+  [ $# -ge 2 ] || die "usage: pn add <name> '<command>' [--dir DIR] [--delay SECONDS]"
+  local name=$1 cmd=$2 dir="$HOME" delay=5
+  shift 2
+  valid_name "$name" || die "names are letters, digits, dot, dash and underscore"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir) dir=$2; shift 2 ;;
+      --delay) delay=$2; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  [[ "$delay" =~ ^[0-9]+$ ]] || die "delay must be a number of seconds"
+  [ -d "$dir" ] || die "no such directory: $dir"
+  dir=$(cd "$dir" && pwd)
+  local existed=0
+  [ -f "$(conf_path "$name")" ] && existed=1
+  {
+    printf 'cmd=%q\n' "$cmd"
+    printf 'dir=%q\n' "$dir"
+    printf 'delay=%q\n' "$delay"
+  } >"$(conf_path "$name")"
+  if [ $existed = 1 ]; then
+    say "updated $name"
+    [ "$(state_of "$name")" = running ] && say "it is running with the old command, pn restart $name to apply"
+  else
+    say "added $name, start it with: pn start $name"
+  fi
+}
+
+start_one() {
+  local name=$1 pid
+  [ -f "$(conf_path "$name")" ] || die "no service named $name"
+  touch "$enabled/$name"
+  pid=$(readnum "$run/$name.pid")
+  if alive "$pid"; then say "$name is already running"; return 0; fi
+  nohup "$lib/supervise.sh" "$name" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  sleep 0.5
+  pid=$(readnum "$run/$name.pid")
+  alive "$pid" || die "$name did not start, see: pn logs $name"
+  say "started $name"
+}
+
+stop_one() {
+  local name=$1 sup child
+  [ -f "$(conf_path "$name")" ] || die "no service named $name"
+  rm -f "$enabled/$name"
+  sup=$(readnum "$run/$name.pid"); child=$(readnum "$run/$name.child")
+  alive "$sup" && kill -TERM "$sup" 2>/dev/null
+  if alive "$child"; then
+    kill -TERM "$child" 2>/dev/null
+    for _ in $(seq 1 20); do alive "$child" || break; sleep 0.5; done
+    alive "$child" && kill -KILL "$child" 2>/dev/null
+  fi
+  for _ in 1 2 3 4; do alive "$sup" || break; sleep 0.5; done
+  alive "$sup" && kill -KILL "$sup" 2>/dev/null
+  rm -f "$run/$name.pid" "$run/$name.child" "$run/$name.since"
+  say "stopped $name"
+}
+
+each_or_all() {
+  local fn=$1; shift
+  if [ $# -eq 0 ]; then
+    local f n=0
+    for f in "$services"/*.conf; do
+      [ -e "$f" ] || continue
+      "$fn" "$(basename "$f" .conf)"; n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || say "no services yet, add one with: pn add <name> '<command>'"
+  else
+    local s
+    for s in "$@"; do "$fn" "$s"; done
+  fi
+}
+
+cmd_remove() {
+  [ $# -eq 1 ] || die "usage: pn remove <name>"
+  local name=$1
+  [ -f "$(conf_path "$name")" ] || die "no service named $name"
+  [ -e "$enabled/$name" ] && stop_one "$name"
+  rm -f "$(conf_path "$name")" "$logs/$name.log" "$logs/$name.log.1" "$run/$name".*
+  say "removed $name"
+}
+
+cmd_logs() {
+  [ $# -ge 1 ] || die "usage: pn logs <name> [-f]"
+  local name=$1 f="$logs/$1.log"
+  [ -f "$(conf_path "$name")" ] || die "no service named $name"
+  [ -f "$f" ] || { say "no log yet for $name"; return 0; }
+  if [ "${2:-}" = -f ]; then tail -n 50 -f "$f"; else tail -n 50 "$f"; fi
+}
+
+cmd_status() {
+  local model os arch up bat line
+  if on_termux; then
+    model="$(prop ro.product.manufacturer) $(prop ro.product.model)"; os="Android $(prop ro.build.version.release)"
+  else
+    model=$(hostname); os=$(uname -s)
+  fi
+  arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
+  up=$(ago "$(cut -d. -f1 /proc/uptime)")
+  line="${bold}phonenode $version${reset} on $model, $os, $arch, up $up"
+  bat=$(battery) && line="$line, battery $bat"
+  say "$line"
+  if on_termux; then
+    say "wake lock   $(wakelock_state)"
+    say "boot hook   $(boot_state)"
+    if ! has sshd; then say "sshd        not installed"
+    elif pgrep -x sshd >/dev/null 2>&1; then say "sshd        running on port 8022"
+    else say "sshd        not running"; fi
+  fi
+  if [ -f "$base/tunnel.conf" ]; then
+    local target='' port=''
+    . "$base/tunnel.conf"
+    say "tunnel      $target, phone port 8022 on 127.0.0.1:$port there, $(state_of tunnel)"
+  fi
+  say ""
+  local f name st pid since rs col
+  printf '%-14s %-11s %-7s %-9s %s\n' SERVICE STATE PID UPTIME RESTARTS
+  for f in "$services"/*.conf; do
+    [ -e "$f" ] || continue
+    name=$(basename "$f" .conf); st=$(state_of "$name")
+    pid=$(readnum "$run/$name.child"); since=$(readnum "$run/$name.since"); rs=$(readnum "$run/$name.restarts")
+    case "$st" in running) col=$green ;; stopped) col=$dim ;; *) col=$yellow ;; esac
+    [ "$st" = running ] || { pid=-; since=; }
+    printf '%-14s %s%-11s%s %-7s %-9s %s\n' "$name" "$col" "$st" "$reset" "${pid:--}" "${since:+$(ago $(( $(now) - since )))}" "${rs:-0}"
+  done
+}
+
+ok() { say "${green}[ok]${reset}   $*"; }
+warn() { say "${yellow}[warn]${reset} $*"; problems=$((problems + 1)); }
+fail() { say "${red}[fail]${reset} $*"; problems=$((problems + 1)); }
+info() { say "${dim}[info]${reset} $*"; }
+
+vendor_advice() {
+  local v=$1
+  case "$v" in
+    xiaomi|redmi|poco)
+      info "MIUI and HyperOS keep their own kill list. Settings > Apps > Manage apps > Termux: Autostart on, Battery saver: No restrictions. Same for Termux:Boot and Termux:API. In Recents, pull the Termux card down to lock it." ;;
+    samsung)
+      info "Samsung: Settings > Battery > Background usage limits: take Termux out of Sleeping apps and put it in Never sleeping apps. Turn Adaptive battery off." ;;
+    huawei|honor)
+      info "Huawei: Settings > Battery > App launch > Termux: Manage manually, all three switches on. Same for Termux:Boot." ;;
+    oneplus|oppo|realme|vivo)
+      info "ColorOS and friends: Battery > Termux > Don't optimize, and allow auto launch. Some versions also need Termux locked in Recents." ;;
+    *)
+      info "Settings > Apps > Termux > Battery > Unrestricted, and the same for Termux:Boot and Termux:API." ;;
+  esac
+  info "Vendor specifics for your model: https://dontkillmyapp.com/$v"
+}
+
+cmd_doctor() {
+  problems=0
+  local f name st rs free arch v go
+  if on_termux; then
+    case "${TERMUX_APK_RELEASE:-}" in
+      PLAY*|play*) fail "this Termux is the Play Store build, which is abandoned and cannot install packages. Install Termux from F-Droid." ;;
+      *) ok "Termux ${TERMUX_VERSION:-} (${TERMUX_APK_RELEASE:-unknown build})" ;;
+    esac
+    if ! has termux-wake-lock; then
+      fail "termux-api package missing: pkg install termux-api, and install the Termux:API app from F-Droid"
+    elif timeout 5 termux-wake-lock >/dev/null 2>&1; then
+      now >"$run/wakelock"; ok "wake lock held (Termux:API answers)"
+    else
+      fail "termux-wake-lock hangs or fails: the Termux:API app is not installed. Get it from F-Droid, same source as Termux."
+    fi
+    st=$(boot_state)
+    case "$st" in
+      "not installed") fail "boot hook not installed, run the installer again" ;;
+      ran*) ok "Termux:Boot $st" ;;
+      installed*) warn "Termux:Boot hook $st. Install the Termux:Boot app from F-Droid and open it once before that reboot." ;;
+      *) fail "Termux:Boot $st. Install Termux:Boot from F-Droid, open it once, check its battery setting, then reboot to verify." ;;
+    esac
+    if st=$(battery); then
+      case "$st" in
+        *charging|*full) ok "battery $st" ;;
+        *) warn "battery $st: a server should stay on the charger" ;;
+      esac
+    fi
+    v=$(prop ro.product.manufacturer | tr '[:upper:]' '[:lower:]')
+    [ "$(prop ro.config.low_ram)" = true ] && info "this is Android Go, which kills background apps harder than regular Android. The battery settings below matter twice."
+    vendor_advice "${v:-unknown}"
+    if ! has sshd; then warn "openssh not installed: pkg install openssh, then passwd, then sshd"
+    elif ! pgrep -x sshd >/dev/null 2>&1; then warn "sshd is not running, start it with: sshd (the boot hook does this after a reboot)"
+    elif [ ! -s "$HOME/.ssh/authorized_keys" ]; then ok "sshd running on 8022, password login only. Put your public key in ~/.ssh/authorized_keys"
+    else ok "sshd running on 8022 with authorized keys"; fi
+    arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
+    case "$arch" in
+      arm|i686) info "userspace is 32-bit ($arch) even if the chip is 64-bit. Binaries built for arm64 will not run here, build for GOARCH=arm or armv7." ;;
+      *) ok "userspace $arch" ;;
+    esac
+    if [ -f "${PREFIX:-}/etc/tls/cert.pem" ]; then ok "CA certificates present"
+    else warn "no CA store: pkg install ca-certificates. Static binaries also need SSL_CERT_FILE=\$PREFIX/etc/tls/cert.pem"; fi
+    [ -f /etc/resolv.conf ] || info "no /etc/resolv.conf on Android. Termux tools resolve fine; a static Go or Rust binary will not until you point it at a resolver (getprop net.dns1 shows one)."
+  else
+    info "not Termux, the Android checks are skipped"
+  fi
+  if has curl; then
+    local hdr theirs mine off
+    hdr=$(curl -sI -m 5 https://api.github.com 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: //p' | head -1)
+    if [ -n "$hdr" ] && theirs=$(date -d "$hdr" +%s 2>/dev/null); then
+      mine=$(now); off=$((mine - theirs)); [ "$off" -lt 0 ] && off=$((-off))
+      if [ "$off" -gt 60 ]; then warn "clock is off by ${off}s, turn on automatic date and time"; else ok "clock within ${off}s of network time"; fi
+    fi
+  fi
+  free=$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print int($4/1024)}')
+  if [ -n "$free" ]; then
+    if [ "$free" -lt 500 ]; then warn "only ${free} MB free under \$HOME"; else ok "${free} MB free under \$HOME"; fi
+  fi
+  go=0
+  for f in "$services"/*.conf; do
+    [ -e "$f" ] || continue
+    go=1; name=$(basename "$f" .conf); st=$(state_of "$name"); rs=$(readnum "$run/$name.restarts")
+    case "$st" in
+      running) if [ "${rs:-0}" -gt 10 ]; then warn "$name is running but restarted ${rs} times, see: pn logs $name"; else ok "$name running"; fi ;;
+      stopped) info "$name is stopped" ;;
+      dead) fail "$name is enabled but has no supervisor. Run: pn start $name. If this repeats after reboots, Termux:Boot is not running." ;;
+      *) warn "$name is $st" ;;
+    esac
+  done
+  [ "$go" = 1 ] || info "no services yet: pn add <name> '<command>'"
+  [ -f "$base/tunnel.conf" ] || info "no tunnel: pn tunnel user@vps port, and the phone is reachable from anywhere"
+  [ -f "$(conf_path heartbeat)" ] || info "no heartbeat: pn heartbeat <url> pings a URL every few minutes, so something outside notices when the phone dies"
+  say ""
+  if [ "$problems" -eq 0 ]; then say "${green}nothing to fix${reset}"; else say "${yellow}$problems thing(s) to look at${reset}"; return 1; fi
+}
+
+cmd_tunnel() {
+  if [ $# -eq 0 ]; then
+    [ -f "$base/tunnel.conf" ] || die "no tunnel. usage: pn tunnel user@host port [--ssh-port 22]"
+    local target='' port='' ssh_port=''
+    . "$base/tunnel.conf"
+    say "tunnel to $target (ssh port ${ssh_port:-22}), phone port 8022 appears there as 127.0.0.1:$port, $(state_of tunnel)"
+    return
+  fi
+  if [ "$1" = off ]; then
+    [ -f "$(conf_path tunnel)" ] && cmd_remove tunnel
+    rm -f "$base/tunnel.conf"
+    say "tunnel removed, the key in ~/.ssh/phonenode_tunnel is kept"
+    return
+  fi
+  [ $# -ge 2 ] || die "usage: pn tunnel user@host port [--ssh-port 22]"
+  local target=$1 port=$2 ssh_port=22 key="$HOME/.ssh/phonenode_tunnel"
+  shift 2
+  while [ $# -gt 0 ]; do
+    case "$1" in --ssh-port) ssh_port=$2; shift 2 ;; *) die "unknown option $1" ;; esac
+  done
+  [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -gt 0 ] && [ "$port" -lt 65536 ] || die "port must be a number"
+  case "$target" in *@*) ;; *) die "target must look like user@host" ;; esac
+  has ssh || die "openssh is not installed: pkg install openssh"
+  mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+  [ -f "$key" ] || ssh-keygen -q -t ed25519 -N "" -C "phonenode@$(hostname)" -f "$key"
+  {
+    printf 'target=%q\n' "$target"
+    printf 'port=%q\n' "$port"
+    printf 'ssh_port=%q\n' "$ssh_port"
+  } >"$base/tunnel.conf"
+  local cmd="ssh -N -p $ssh_port -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -i $key -R 127.0.0.1:$port:127.0.0.1:8022 $target"
+  cmd_add tunnel "$cmd" --delay 20 >/dev/null
+  say "on $target, add this line to ~/.ssh/authorized_keys of that user:"
+  say ""
+  say "  restrict,port-forwarding,permitlisten=\"127.0.0.1:$port\" $(cat "$key.pub")"
+  say ""
+  say "on your laptop, add this to ~/.ssh/config, then: ssh myphone"
+  say ""
+  say "  Host myphone"
+  say "      HostName 127.0.0.1"
+  say "      Port $port"
+  say "      User $(whoami 2>/dev/null || echo u0_a)"
+  say "      ProxyJump $target${ssh_port:+ }"
+  [ "$ssh_port" != 22 ] && say "      (the jump host listens on $ssh_port, put that in a Host entry for it)"
+  say ""
+  say "then: pn start tunnel"
+}
+
+cmd_heartbeat() {
+  if [ $# -eq 0 ]; then
+    [ -f "$(conf_path heartbeat)" ] || die "no heartbeat. usage: pn heartbeat <url> [minutes]"
+    load_conf heartbeat; say "heartbeat: $cmd"; say "state: $(state_of heartbeat)"; return
+  fi
+  if [ "$1" = off ]; then [ -f "$(conf_path heartbeat)" ] && cmd_remove heartbeat; return; fi
+  local url=$1 minutes=${2:-5}
+  case "$url" in http://*|https://*) ;; *) die "url must start with http:// or https://" ;; esac
+  [[ "$minutes" =~ ^[0-9]+$ ]] && [ "$minutes" -gt 0 ] || die "minutes must be a positive number"
+  has curl || die "curl is not installed: pkg install curl"
+  cmd_add heartbeat "while :; do curl -fsS -m 20 -o /dev/null $(printf '%q' "$url") || true; sleep $((minutes * 60)); done" --delay 30 >/dev/null
+  start_one heartbeat
+  say "pinging $url every $minutes minute(s). Set the check there to expect one every $minutes minutes."
+}
+
+cmd_uninstall() {
+  if [ "${1:-}" != --yes ]; then
+    printf 'this stops every service and removes %s. Continue? [y/N] ' "$base"
+    read -r a; case "$a" in y|Y) ;; *) say "kept"; return 0 ;; esac
+  fi
+  local f
+  for f in "$enabled"/*; do [ -e "$f" ] && stop_one "$(basename "$f")"; done
+  rm -f "$hook"
+  [ -f "$HOME/.bashrc" ] && sed -i '/phonenode\.sh/d' "$HOME/.bashrc"
+  local link
+  for link in "${PREFIX:-/nonexistent}/bin/pn" "$HOME/.local/bin/pn"; do
+    [ -L "$link" ] && rm -f "$link"
+  done
+  rm -rf "$base"
+  say "phonenode removed. ~/.ssh/phonenode_tunnel was kept, delete it yourself if you want."
+}
+
+cmd_help() {
+  cat <<EOF
+pn $version, keeps things running on an Android phone
+
+  pn add <name> '<command>' [--dir DIR] [--delay SECONDS]
+  pn start|stop|restart [name...]     no name means every service
+  pn remove <name>
+  pn status
+  pn logs <name> [-f]
+  pn doctor                           what will kill this phone server, and how to fix it
+  pn tunnel user@host port            reach the phone from anywhere through that host
+  pn tunnel off
+  pn heartbeat <url> [minutes]        ping a URL so something outside notices when the phone dies
+  pn heartbeat off
+  pn uninstall
+EOF
+}
+
+[ -d "$base" ] || die "not installed for this user, run the installer first"
+cmd=${1:-status}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  add) cmd_add "$@" ;;
+  start) each_or_all start_one "$@" ;;
+  stop) each_or_all stop_one "$@" ;;
+  restart) each_or_all stop_one "$@"; each_or_all start_one "$@" ;;
+  remove|rm) cmd_remove "$@" ;;
+  status|list|ls) cmd_status ;;
+  logs|log) cmd_logs "$@" ;;
+  doctor) cmd_doctor ;;
+  tunnel) cmd_tunnel "$@" ;;
+  heartbeat) cmd_heartbeat "$@" ;;
+  uninstall) cmd_uninstall "$@" ;;
+  version|-v|--version) say "$version" ;;
+  help|-h|--help) cmd_help ;;
+  *) die "unknown command $cmd, see: pn help" ;;
+esac
