@@ -1,10 +1,31 @@
 # phonenode
 
+<p align="center">
+  <img src="https://img.shields.io/badge/English-2ea043?style=flat-square" alt="English">
+  <a href="docs/i18n/README.ru.md"><img src="https://img.shields.io/badge/%D0%A0%D1%83%D1%81%D1%81%D0%BA%D0%B8%D0%B9-30363d?style=flat-square" alt="Русский"></a>
+  <a href="docs/i18n/README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-30363d?style=flat-square" alt="简体中文"></a>
+  <a href="docs/i18n/README.es.md"><img src="https://img.shields.io/badge/Espa%C3%B1ol-30363d?style=flat-square" alt="Español"></a>
+  <a href="docs/i18n/README.pt-BR.md"><img src="https://img.shields.io/badge/Portugu%C3%AAs-30363d?style=flat-square" alt="Português"></a>
+  <a href="docs/i18n/README.de.md"><img src="https://img.shields.io/badge/Deutsch-30363d?style=flat-square" alt="Deutsch"></a>
+  <a href="docs/i18n/README.fr.md"><img src="https://img.shields.io/badge/Fran%C3%A7ais-30363d?style=flat-square" alt="Français"></a>
+  <a href="docs/i18n/README.ja.md"><img src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-30363d?style=flat-square" alt="日本語"></a>
+  <a href="docs/i18n/README.hi.md"><img src="https://img.shields.io/badge/%E0%A4%B9%E0%A4%BF%E0%A4%A8%E0%A5%8D%E0%A4%A6%E0%A5%80-30363d?style=flat-square" alt="हिन्दी"></a>
+  <a href="docs/i18n/README.id.md"><img src="https://img.shields.io/badge/Bahasa%20Indonesia-30363d?style=flat-square" alt="Bahasa Indonesia"></a>
+</p>
+
+[![ci](https://github.com/macintoshi-nakamoto/phonenode/actions/workflows/ci.yml/badge.svg)](https://github.com/macintoshi-nakamoto/phonenode/actions/workflows/ci.yml)
+![bash](https://img.shields.io/badge/bash-no%20dependencies-4EAA25?logo=gnubash&logoColor=white)
+![android](https://img.shields.io/badge/Android%207%2B-no%20root-3DDC84?logo=android&logoColor=white)
+![termux](https://img.shields.io/badge/Termux-F--Droid%20build-111111)
+![license](https://img.shields.io/badge/license-MIT-blue)
+
 Turn an old Android phone into an always-on server. No root, no custom ROM, one command.
 
 An old phone is a small Linux box with a battery for a UPS that draws a watt or two. Getting something to run on it was never the hard part. The hard part is that six hours later Android has killed it, or the phone rebooted and nothing came back, or it sits behind your router's NAT where you cannot reach it, or the logs ate the storage and you found out a week later. phonenode is the set of things you need so that the phone stays up and stays reachable, plus a `doctor` that tells you which of them is missing on your phone.
 
 I run a network measurement probe on a POCO C51 that cost about fifty dollars. It lives in a drawer on Wi-Fi, checks in every fifteen minutes, has survived reboots and Android Go, and I ssh into it from anywhere through a two dollar VPS. Everything I had to learn to get there is in this repository, so you do not have to learn it again.
+
+<p align="center"><img src="docs/how-it-works.svg" alt="the phone on home Wi-Fi, the reverse tunnel to a VPS, the laptop reaching it with ssh, the heartbeat to healthchecks" width="900"></p>
 
 ## What you get
 
@@ -47,19 +68,7 @@ pn doctor
 
 goes through the list of things that kill a phone server and says what to fix, with the menu path for your vendor. It also tells you whether Termux:Boot actually ran after the last reboot, which is the one thing you cannot see from the settings.
 
-```
-$ pn status
-phonenode 0.1.0 on Xiaomi 2305EPCC4G, Android 13, arm, up 4d 2h, battery 100% full
-wake lock   held
-boot hook   ran 1m after the last boot
-sshd        running on port 8022
-tunnel      pn@203.0.113.7, phone port 8022 on 127.0.0.1:2201 there, running
-
-SERVICE        STATE       PID     UPTIME    RESTARTS
-probe          running     31602   4d 2h     0
-tunnel         running     31611   4d 2h     1
-heartbeat      running     31640   4d 2h     0
-```
+<p align="center"><img src="docs/status.svg" alt="pn status and pn doctor output on a POCO C51" width="880"></p>
 
 ## Reach it from anywhere
 
@@ -112,6 +121,7 @@ Each of these cost an evening. The doctor checks for them now.
 - **The userspace can be 32-bit on a 64-bit chip.** Budget phones ship armeabi-v7a Termux on an arm64 CPU. `uname -m` says armv8l and lies, `dpkg --print-architecture` says arm and is right. An arm64 binary will not even start.
 - **There is no CA store.** Go and Rust binaries verify TLS against the system store, Termux has none until `pkg install ca-certificates`, and static binaries still need `SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem` to find it. The symptom looks like a broken network.
 - **There is no `/etc/resolv.conf`.** Termux's own tools resolve names through Android. A static binary does not, and fails every DNS lookup until you point it at a resolver. `getprop net.dns1` shows one, the router usually works too.
+- **`/proc` is mostly closed.** On Android 13 an app cannot read `/proc/uptime` or `/proc/net/tcp`, and `pgrep` can miss processes because the names it sees are truncated. phonenode reads uptime from `/proc/self/stat` and checks sshd by connecting to it.
 - **Termux:API commands hang forever when the Termux:API app is missing.** Not an error, a hang. Everything in phonenode calls them under `timeout`.
 - **Never `scp` a script over one that is running.** bash reads scripts incrementally, `scp` truncates and rewrites the same file, and the running copy reads garbage or forks twice. Write a new file and `mv` it. That is how I once had two supervisors on one phone.
 - **`pkill -f` by name will kill your own supervisor** if its command line contains the name you are matching. phonenode kills by pid from files, and the supervisor's command line does not contain your command.
@@ -120,6 +130,8 @@ Each of these cost an evening. The doctor checks for them now.
 ## Contributing
 
 Small pull requests, one thing each. `shellcheck` must be clean and `tests/smoke.sh` must pass, both run in CI on every push. Bash on purpose: anyone can open the scripts and see what they do to their phone before running them.
+
+Translations live in `docs/i18n`. If yours reads badly, fix it, the English file is the reference.
 
 ## License
 

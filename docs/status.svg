@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" viewBox="0 0 880 520" width="880" height="520" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5">
+  <rect x="0.5" y="0.5" width="879" height="519" rx="10" fill="#0d1117" stroke="#30363d"/>
+  <circle cx="22" cy="20" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="20" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="20" r="6" fill="#27c93f"/>
+  <text x="440" y="24" fill="#8b949e" text-anchor="middle" font-size="12">ssh myphone</text>
+  <g fill="#c9d1d9">
+    <text x="20" y="58"><tspan fill="#8b949e">$ </tspan>pn status</text>
+    <text x="20" y="76" font-weight="bold">phonenode 0.1.0 on Xiaomi 2305EPCC4G, Android 13, arm, up 3d 21h, battery 100% charging</text>
+    <text x="20" y="94">wake lock   held</text>
+    <text x="20" y="112">boot hook   ran 1m after the last boot</text>
+    <text x="20" y="130">sshd        running on port 8022</text>
+    <text x="20" y="148">tunnel      pn@203.0.113.7, phone port 8022 on 127.0.0.1:2201 there, running</text>
+    <text x="20" y="184">SERVICE        STATE       PID     UPTIME    RESTARTS</text>
+    <text x="20" y="202">probe          <tspan fill="#3fb950">running    </tspan> 31602   3d 21h    0</text>
+    <text x="20" y="220">tunnel         <tspan fill="#3fb950">running    </tspan> 31611   3d 21h    1</text>
+    <text x="20" y="238">heartbeat      <tspan fill="#3fb950">running    </tspan> 31640   3d 21h    0</text>
+    <text x="20" y="274"><tspan fill="#8b949e">$ </tspan>pn doctor</text>
+    <text x="20" y="292"><tspan fill="#3fb950">[ok]</tspan>   Termux 0.119.0-beta.3 (F_DROID build)</text>
+    <text x="20" y="310"><tspan fill="#3fb950">[ok]</tspan>   wake lock held (Termux:API answers)</text>
+    <text x="20" y="328"><tspan fill="#3fb950">[ok]</tspan>   Termux:Boot ran 1m after the last boot</text>
+    <text x="20" y="346"><tspan fill="#3fb950">[ok]</tspan>   battery 100% charging</text>
+    <text x="20" y="364"><tspan fill="#8b949e">[info]</tspan> this is Android Go, which kills background apps harder than regular Android</text>
+    <text x="20" y="382"><tspan fill="#8b949e">[info]</tspan> MIUI and HyperOS keep their own kill list. Settings &gt; Apps &gt; Manage apps &gt; Termux: Autostart on</text>
+    <text x="20" y="400"><tspan fill="#3fb950">[ok]</tspan>   sshd running on 8022 with authorized keys</text>
+    <text x="20" y="418"><tspan fill="#8b949e">[info]</tspan> userspace is 32-bit (arm) even if the chip is 64-bit. Binaries built for arm64 will not run here</text>
+    <text x="20" y="436"><tspan fill="#3fb950">[ok]</tspan>   clock within 2s of network time</text>
+    <text x="20" y="454"><tspan fill="#3fb950">[ok]</tspan>   44974 MB free under $HOME</text>
+    <text x="20" y="490" fill="#3fb950">nothing to fix</text>
+  </g>
+</svg>
